@@ -1,0 +1,4 @@
+.env
+.strava_token
+__pycache__/
+.venv/
