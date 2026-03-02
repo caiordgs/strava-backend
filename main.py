@@ -143,6 +143,8 @@ async def get_activities(per_page: int = 50, page: int = 1):
             "maxHr":     a.get("max_heartrate"),
             "calories":  a.get("calories"),
             "polyline":  a.get("map", {}).get("summary_polyline"),
+            "avgSpeed":  round(a.get("average_speed", 0) * 3.6, 1),
+            "maxSpeed":  round(a.get("max_speed", 0) * 3.6, 1),
         })
     return runs
 
