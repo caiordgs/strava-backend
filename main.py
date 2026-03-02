@@ -87,7 +87,6 @@ def auth():
         </body></html>
     """)
 
-@app.get("/caSllback")
 @app.get("/callback")
 async def callback(code: str):
     async with httpx.AsyncClient() as client:
