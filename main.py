@@ -252,7 +252,7 @@ def health():
 
 @app.get("/")
 def root():
-    return {"endpoints": ["/auth", "/athlete", "/activities", "/activities/{id}/streams", "/stats"]}
+    return {"endpoints": ["/auth", "/athlete", "/activities", "/activities/{id}/streams", "/stats", "/health"]}
 
 # ── Utils ─────────────────────────────────────────────────────────────────────
 
