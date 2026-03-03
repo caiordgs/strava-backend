@@ -2,6 +2,7 @@ import os
 import json
 import time
 import httpx
+import psycopg2
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -11,7 +12,7 @@ load_dotenv()
 
 app = FastAPI(title="Strava Dashboard API")
 
-# ── CORS — localhost (dev) + domínio do Railway (prod) ──────────────────────
+# ── CORS ──────────────────────────────────────────────────────────────────────
 FRONTEND_URL = os.getenv("FRONTEND_URL", "")
 origins = ["http://localhost:5173", "http://localhost:3000"]
 if FRONTEND_URL:
@@ -28,16 +29,59 @@ app.add_middleware(
 CLIENT_ID     = os.getenv("STRAVA_CLIENT_ID")
 CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
 REDIRECT_URI  = os.getenv("STRAVA_REDIRECT_URI", "http://localhost:8000/callback")
+DATABASE_URL  = os.getenv("DATABASE_URL")
 
-# ── Token storage ─────────────────────────────────────────────────────────────
-# Em produção (Railway) não há filesystem persistente, então salva em memória.
-# O token será repedido via /auth se o servidor reiniciar.
+# ── DB helpers ────────────────────────────────────────────────────────────────
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
+
+def init_db():
+    """Cria a tabela de tokens se não existir."""
+    if not DATABASE_URL:
+        return
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tokens (
+                        id INTEGER PRIMARY KEY DEFAULT 1,
+                        data JSONB NOT NULL,
+                        updated_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+            conn.commit()
+    except Exception as e:
+        print(f"[DB] Erro ao inicializar: {e}")
+
+# Inicializa o banco ao subir o servidor
+init_db()
+
+# ── Token storage — PostgreSQL com fallback para arquivo local ────────────────
 _token_cache: dict | None = None
 
 def save_token(data: dict):
     global _token_cache
     _token_cache = data
-    # também tenta salvar em arquivo (dev)
+
+    # Salva no PostgreSQL (produção)
+    if DATABASE_URL:
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO tokens (id, data, updated_at)
+                        VALUES (1, %s, NOW())
+                        ON CONFLICT (id) DO UPDATE
+                            SET data = EXCLUDED.data,
+                                updated_at = NOW()
+                    """, (json.dumps(data),))
+                conn.commit()
+            print("[DB] Token salvo no PostgreSQL.")
+        except Exception as e:
+            print(f"[DB] Erro ao salvar token: {e}")
+
+    # Fallback: arquivo local (desenvolvimento)
     try:
         with open(".strava_token", "w") as f:
             json.dump(data, f)
@@ -45,11 +89,33 @@ def save_token(data: dict):
         pass
 
 def load_token() -> dict | None:
+    global _token_cache
+
+    # 1. Cache em memória (mais rápido)
     if _token_cache:
         return _token_cache
+
+    # 2. PostgreSQL (produção)
+    if DATABASE_URL:
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT data FROM tokens WHERE id = 1")
+                    row = cur.fetchone()
+                    if row:
+                        _token_cache = row[0]
+                        print("[DB] Token carregado do PostgreSQL.")
+                        return _token_cache
+        except Exception as e:
+            print(f"[DB] Erro ao carregar token: {e}")
+
+    # 3. Arquivo local (desenvolvimento)
     if os.path.exists(".strava_token"):
         with open(".strava_token") as f:
-            return json.load(f)
+            data = json.load(f)
+            _token_cache = data
+            return data
+
     return None
 
 async def get_valid_token() -> str:
@@ -65,8 +131,9 @@ async def get_valid_token() -> str:
                 "refresh_token": token["refresh_token"],
             })
             resp.raise_for_status()
-            save_token(resp.json())
-            return resp.json()["access_token"]
+            new_token = resp.json()
+            save_token(new_token)
+            return new_token["access_token"]
     return token["access_token"]
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -172,7 +239,16 @@ async def get_stats():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    db_ok = False
+    if DATABASE_URL:
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            db_ok = True
+        except Exception:
+            pass
+    return {"status": "ok", "db": "connected" if db_ok else "unavailable"}
 
 @app.get("/")
 def root():
